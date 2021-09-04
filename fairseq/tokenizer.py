@@ -18,7 +18,7 @@ SPACE_NORMALIZER = re.compile(r"\s+")
 #     return line.split()
 
 # Use mT5 tokenizer to deal with raw text
-fast_tok=T5TokenizerFast.from_pretrained("~/mT5_tokenizer")
+fast_tok=T5TokenizerFast.from_pretrained("./mT5_tokenizer")
 def tokenize_line(line):
     line = SPACE_NORMALIZER.sub(" ", line)
     line = line.strip()
