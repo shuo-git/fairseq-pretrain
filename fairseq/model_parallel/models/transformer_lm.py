@@ -178,10 +178,10 @@ def transformer_lm_megatron_11b(args):
     "model_parallel_transformer_lm", "transformer_lm_gpt2_big_model_parallel"
 )
 def transformer_lm_gpt2_big(args):
-    args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 1600)
-    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 6400)
+    args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 1536)
+    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 6144)
     args.decoder_layers = getattr(args, "decoder_layers", 48)
-    args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 25)
+    args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 24)
     args.dropout = getattr(args, "dropout", 0.1)
     args.attention_dropout = getattr(args, "attention_dropout", 0.1)
     args.activation_fn = getattr(args, "activation_fn", "gelu")
