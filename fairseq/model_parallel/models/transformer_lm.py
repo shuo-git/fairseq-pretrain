@@ -186,3 +186,23 @@ def transformer_lm_gpt2_big(args):
     args.attention_dropout = getattr(args, "attention_dropout", 0.1)
     args.activation_fn = getattr(args, "activation_fn", "gelu")
     base_lm_architecture(args)
+
+
+@register_model_architecture(
+    "model_parallel_transformer_lm", "transformer_lm_gpt3_6_7_model_parallel"
+)
+def transformer_lm_gpt3_6_7(args):
+    # 6.7B params
+    args.decoder_layers = getattr(args, "decoder_layers", 32)
+    args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 4096)
+    args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 32)
+    args.decoder_input_dim = args.decoder_embed_dim
+    args.decoder_output_dim = args.decoder_embed_dim
+    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", args.decoder_embed_dim * 4)
+    # GPT-3 used learned positional embeddings, rather than sinusoidal
+    args.decoder_learned_pos = getattr(args, "decoder_learned_pos", True)
+    args.dropout = getattr(args, "dropout", 0.0)
+    args.attention_dropout = getattr(args, "attention_dropout", 0.0)
+    args.activation_fn = getattr(args, "activation_fn", "gelu")
+    args.share_decoder_input_output_embed = True
+    base_lm_architecture(args)
