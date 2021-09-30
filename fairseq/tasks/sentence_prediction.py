@@ -81,6 +81,9 @@ class SentencePredictionConfig(FairseqDataclass):
     tokens_per_sample: int = field(
         default=1024,
     )
+    max_target_positions: int = field(
+        default=1024,
+    )
 
     regression_target: bool = II("criterion.regression_target")
     classification_head_name: str = II("criterion.classification_head_name")
