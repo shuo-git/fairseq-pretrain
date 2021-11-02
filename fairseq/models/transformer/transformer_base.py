@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 from fairseq import utils
+import logging
 from fairseq.dataclass.utils import gen_parser_from_dataclass
 from fairseq.distributed import fsdp_wrap
 from fairseq.models import FairseqEncoderDecoderModel
@@ -17,7 +18,7 @@ from fairseq.models.transformer import (
     TransformerConfig,
 )
 from torch import Tensor
-
+logger = logging.getLogger(__name__)
 
 class TransformerModelBase(FairseqEncoderDecoderModel):
     """
@@ -40,6 +41,9 @@ class TransformerModelBase(FairseqEncoderDecoderModel):
         super().__init__(encoder, decoder)
         self.cfg = cfg
         self.supports_align_args = True
+        self.classification_heads = nn.ModuleDict()
+        if hasattr(self.encoder, "dictionary"):
+            self.eos: int = self.encoder.dictionary.eos()
 
     @staticmethod
     def add_args(parser):
@@ -74,7 +78,7 @@ class TransformerModelBase(FairseqEncoderDecoderModel):
                     "--share-all-embeddings requires --encoder-embed-dim to match --decoder-embed-dim"
                 )
             if cfg.decoder.embed_path and (
-                cfg.decoder.embed_path != cfg.encoder.embed_path
+                    cfg.decoder.embed_path != cfg.encoder.embed_path
             ):
                 raise ValueError(
                     "--share-all-embeddings not compatible with --decoder-embed-path"
@@ -129,14 +133,15 @@ class TransformerModelBase(FairseqEncoderDecoderModel):
     # TorchScript doesn't support optional arguments with variable length (**kwargs).
     # Current workaround is to add union of all arguments in child classes.
     def forward(
-        self,
-        src_tokens,
-        src_lengths,
-        prev_output_tokens,
-        return_all_hiddens: bool = True,
-        features_only: bool = False,
-        alignment_layer: Optional[int] = None,
-        alignment_heads: Optional[int] = None,
+            self,
+            src_tokens,
+            src_lengths,
+            prev_output_tokens,
+            classification_head_name: Optional[str] = None,
+            return_all_hiddens: bool = True,
+            features_only: bool = False,
+            alignment_layer: Optional[int] = None,
+            alignment_heads: Optional[int] = None,
     ):
         """
         Run the forward pass for an encoder-decoder model.
@@ -144,10 +149,13 @@ class TransformerModelBase(FairseqEncoderDecoderModel):
         Copied from the base class, but without ``**kwargs``,
         which are not supported by TorchScript.
         """
+        if classification_head_name is not None:
+            features_only = True
+
         encoder_out = self.encoder(
             src_tokens, src_lengths=src_lengths, return_all_hiddens=return_all_hiddens
         )
-        decoder_out = self.decoder(
+        x, extra = self.decoder(
             prev_output_tokens,
             encoder_out=encoder_out,
             features_only=features_only,
@@ -156,21 +164,89 @@ class TransformerModelBase(FairseqEncoderDecoderModel):
             src_lengths=src_lengths,
             return_all_hiddens=return_all_hiddens,
         )
-        return decoder_out
+
+        eos: int = self.eos
+        if classification_head_name is not None:
+            sentence_representation = x[
+                                      src_tokens.eq(eos), :
+                                      ].view(x.size(0), -1, x.size(-1))[:, -1, :]
+            for k, head in self.classification_heads.items():
+                # for torch script only supports iteration
+                if k == classification_head_name:
+                    x = head(sentence_representation)
+                    break
+
+        return x, extra
+
+    def register_classification_head(
+        self, name, num_classes=None, inner_dim=None, **kwargs
+    ):
+        """Register a classification head."""
+        logger.info("Registering classification head: {0}".format(name))
+        if name in self.classification_heads:
+            prev_num_classes = self.classification_heads[name].out_proj.out_features
+            prev_inner_dim = self.classification_heads[name].dense.out_features
+            if num_classes != prev_num_classes or inner_dim != prev_inner_dim:
+                logger.warning(
+                    're-registering head "{}" with num_classes {} (prev: {}) '
+                    "and inner_dim {} (prev: {})".format(
+                        name, num_classes, prev_num_classes, inner_dim, prev_inner_dim
+                    )
+                )
+        self.classification_heads[name] = TransformerClassificationHead(
+            input_dim=self.args.encoder_embed_dim,
+            inner_dim=inner_dim or self.args.encoder_embed_dim,
+            num_classes=num_classes,
+            activation_fn=self.args.pooler_activation_fn,
+            pooler_dropout=self.args.pooler_dropout,
+            do_spectral_norm=getattr(
+                self.args, "spectral_norm_classification_head", False
+            ),
+        )
 
     # Since get_normalized_probs is in the Fairseq Model which is not scriptable,
     # I rewrite the get_normalized_probs from Base Class to call the
     # helper function in the Base Class.
     @torch.jit.export
     def get_normalized_probs(
-        self,
-        net_output: Tuple[Tensor, Optional[Dict[str, List[Optional[Tensor]]]]],
-        log_probs: bool,
-        sample: Optional[Dict[str, Tensor]] = None,
+            self,
+            net_output: Tuple[Tensor, Optional[Dict[str, List[Optional[Tensor]]]]],
+            log_probs: bool,
+            sample: Optional[Dict[str, Tensor]] = None,
     ):
         """Get normalized probabilities (or log probs) from a net's output."""
         return self.get_normalized_probs_scriptable(net_output, log_probs, sample)
 
+
+class TransformerClassificationHead(nn.Module):
+    """Head for sentence-level classification tasks."""
+
+    def __init__(
+        self,
+        input_dim,
+        inner_dim,
+        num_classes,
+        activation_fn,
+        pooler_dropout,
+        do_spectral_norm=False,
+    ):
+        super().__init__()
+        self.dense = nn.Linear(input_dim, inner_dim)
+        self.activation_fn = utils.get_activation_fn(activation_fn)
+        self.dropout = nn.Dropout(p=pooler_dropout)
+        self.out_proj = nn.Linear(inner_dim, num_classes)
+
+        if do_spectral_norm:
+            self.out_proj = torch.nn.utils.spectral_norm(self.out_proj)
+
+    def forward(self, features, **kwargs):
+        x = features
+        x = self.dropout(x)
+        x = self.dense(x)
+        x = self.activation_fn(x)
+        x = self.dropout(x)
+        x = self.out_proj(x)
+        return x
 
 def Embedding(num_embeddings, embedding_dim, padding_idx):
     m = nn.Embedding(num_embeddings, embedding_dim, padding_idx=padding_idx)
