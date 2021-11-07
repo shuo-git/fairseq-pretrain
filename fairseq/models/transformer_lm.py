@@ -6,6 +6,10 @@
 
 from dataclasses import dataclass, field
 from typing import Optional
+import logging
+import torch
+
+import torch.nn as nn
 
 from fairseq import options, utils
 from fairseq.dataclass import ChoiceEnum, FairseqDataclass
@@ -22,7 +26,7 @@ from omegaconf import II
 
 
 DEFAULT_MAX_TARGET_POSITIONS = 1024
-
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TransformerLanguageModelConfig(FairseqDataclass):
@@ -180,6 +184,15 @@ class TransformerLanguageModelConfig(FairseqDataclass):
             )
         }
     )
+
+    pooler_activation_fn: str = field(
+        default='tanh', metadata={"help": "Pooler activation function of the classification head"}
+    )
+
+    pooler_dropout: float = field(
+        default=0, metadata={"help": "Pooler dropout rate"}
+    )
+
     # config for "BASE Layers: Simplifying Training of Large, Sparse Models"
     base_layers: Optional[int] = field(
         default=0, metadata={"help": "number of BASE layers in total"}
@@ -190,6 +203,7 @@ class TransformerLanguageModelConfig(FairseqDataclass):
     base_shuffle: Optional[int] = field(
         default=1, metadata={"help": "shuffle tokens between workers before computing assignment"}
     )
+
     # options from other parts of the config
     add_bos_token: bool = II("task.add_bos_token")
     tokens_per_sample: int = II("task.tokens_per_sample")
@@ -235,6 +249,10 @@ class TransformerLanguageModel(FairseqLanguageModel):
 
     def __init__(self, decoder):
         super().__init__(decoder)
+        self.classification_heads = nn.ModuleDict()
+        if hasattr(self.decoder, "dictionary"):
+            self.eos: int = self.decoder.dictionary.eos()
+
 
     @classmethod
     def build_model(cls, args, task):
@@ -284,13 +302,226 @@ class TransformerLanguageModel(FairseqLanguageModel):
 
         decoder = TransformerDecoder(
             args, task.target_dictionary, embed_tokens, no_encoder_attn=True
-        )
-        return cls(decoder)
+        )   
+        model = cls(decoder)
+        model.args = args
+        return model
 
     @classmethod
     def build_embedding(cls, args, dictionary, embed_dim, path=None):
         embed_tokens = Embedding(len(dictionary), embed_dim, dictionary.pad())
         return embed_tokens
+
+    def forward(
+        self,
+        src_tokens,
+        # src_lengths,
+        # prev_output_tokens,
+        features_only: bool = False,
+        classification_head_name: Optional[str] = None,
+        # return_all_hiddens: bool = True,
+        # alignment_layer: Optional[int] = None,
+        # alignment_heads: Optional[int] = None,
+        **kwargs
+    ):
+        # print(self)
+        if classification_head_name is not None:
+            features_only = True
+
+        x, extra = self.decoder(
+            # src_tokens=src_tokens,
+            features_only = features_only,
+            **kwargs
+        )
+        eos: int = self.eos
+        if classification_head_name is not None:
+            sentence_representation = x[
+                src_tokens.eq(eos), :
+            ].view(x.size(0), -1, x.size(-1))[:, -1, :]
+            for k, head in self.classification_heads.items():
+                # for torch script only supports iteration
+                if k == classification_head_name:
+                    x = head(sentence_representation)
+                    break
+        return x, extra
+
+    def register_classification_head(
+        self, name, num_classes=None, inner_dim=None, **kwargs
+    ):
+        """Register a classification head."""
+        logger.info("Registering classification head: {0}".format(name))
+        if name in self.classification_heads:
+            prev_num_classes = self.classification_heads[name].out_proj.out_features
+            prev_inner_dim = self.classification_heads[name].dense.out_features
+            if num_classes != prev_num_classes or inner_dim != prev_inner_dim:
+                logger.warning(
+                    're-registering head "{}" with num_classes {} (prev: {}) '
+                    "and inner_dim {} (prev: {})".format(
+                        name, num_classes, prev_num_classes, inner_dim, prev_inner_dim
+                    )
+                )
+        self.classification_heads[name] = TransformerClassificationHead(
+            input_dim=self.args.decoder_embed_dim,
+            inner_dim=inner_dim or self.args.decoder_embed_dim,
+            num_classes=num_classes,
+            activation_fn=self.args.pooler_activation_fn,
+            pooler_dropout=self.args.pooler_dropout,
+            do_spectral_norm=getattr(
+                self.args, "spectral_norm_classification_head", False
+            ),
+        )
+
+    def upgrade_state_dict_named(self, state_dict, name):
+        super().upgrade_state_dict_named(state_dict, name)
+
+        prefix = name + "." if name != "" else ""
+        current_head_names = (
+            []
+            if not hasattr(self, "classification_heads")
+            else self.classification_heads.keys()
+        )
+
+        # Handle new classification heads present in the state dict.
+        keys_to_delete = []
+        for k in state_dict.keys():
+            if not k.startswith(prefix + "classification_heads."):
+                continue
+
+            head_name = k[len(prefix + "classification_heads.") :].split(".")[0]
+            num_classes = state_dict[
+                prefix + "classification_heads." + head_name + ".out_proj.weight"
+            ].size(0)
+            inner_dim = state_dict[
+                prefix + "classification_heads." + head_name + ".dense.weight"
+            ].size(0)
+
+            if getattr(self.args, "load_checkpoint_heads", False):
+                if head_name not in current_head_names:
+                    self.register_classification_head(head_name, num_classes, inner_dim)
+            else:
+                if head_name not in current_head_names:
+                    logger.warning(
+                        "deleting classification head ({}) from checkpoint "
+                        "not present in current model: {}".format(head_name, k)
+                    )
+                    keys_to_delete.append(k)
+                elif (
+                    num_classes
+                    != self.classification_heads[head_name].out_proj.out_features
+                    or inner_dim
+                    != self.classification_heads[head_name].dense.out_features
+                ):
+                    logger.warning(
+                        "deleting classification head ({}) from checkpoint "
+                        "with different dimensions than current model: {}".format(
+                            head_name, k
+                        )
+                    )
+                    keys_to_delete.append(k)
+        for k in keys_to_delete:
+            del state_dict[k]
+
+        def truncate_emb(key):
+            if key in state_dict:
+                state_dict[key] = state_dict[key][:-1, :]
+
+        # # When finetuning on translation task, remove last row of
+        # # embedding matrix that corresponds to mask_idx token.
+        loaded_dict_size = state_dict["decoder.embed_tokens.weight"].size(0)
+        if (
+            loaded_dict_size == len(self.decoder.dictionary) + 1
+            and "<mask>" not in self.decoder.dictionary
+        ):
+            # truncate_emb("encoder.embed_tokens.weight")
+            truncate_emb("decoder.embed_tokens.weight")
+            # truncate_emb("encoder.output_projection.weight")
+            truncate_emb("decoder.output_projection.weight")
+
+        # When continued pretraining on new set of languages for mbart,
+        # add extra lang embeddings at the end of embed_tokens.
+        # Note: newly added languages are assumed to have been added at the end.
+        # if self.args.task == "multilingual_denoising" and loaded_dict_size < len(
+        #     self.encoder.dictionary
+        # ):
+        #     logger.info(
+        #         "Adding extra language embeddings not found in pretrained model for "
+        #         "continued pretraining of MBART on new set of languages."
+        #     )
+        #     loaded_mask_token_embedding = state_dict["encoder.embed_tokens.weight"][
+        #         -1, :
+        #     ]
+
+        #     num_langids_to_add = len(self.encoder.dictionary) - loaded_dict_size
+        #     embed_dim = state_dict["encoder.embed_tokens.weight"].size(1)
+
+        #     new_lang_embed_to_add = torch.zeros(num_langids_to_add, embed_dim)
+        #     nn.init.normal_(new_lang_embed_to_add, mean=0, std=embed_dim ** -0.5)
+        #     new_lang_embed_to_add = new_lang_embed_to_add.to(
+        #         dtype=state_dict["encoder.embed_tokens.weight"].dtype,
+        #     )
+
+        #     state_dict["encoder.embed_tokens.weight"] = torch.cat(
+        #         [
+        #             state_dict["encoder.embed_tokens.weight"][
+        #                 : loaded_dict_size - 1, :
+        #             ],
+        #             new_lang_embed_to_add,
+        #             loaded_mask_token_embedding.unsqueeze(0),
+        #         ]
+        #     )
+            # state_dict["decoder.embed_tokens.weight"] = torch.cat(
+            #     [
+            #         state_dict["decoder.embed_tokens.weight"][
+            #             : loaded_dict_size - 1, :
+            #         ],
+            #         new_lang_embed_to_add,
+            #         loaded_mask_token_embedding.unsqueeze(0),
+            #     ]
+            # )
+
+        # Copy any newly-added classification heads into the state dict
+        # with their current weights.
+        if hasattr(self, "classification_heads"):
+            cur_state = self.classification_heads.state_dict()
+            for k, v in cur_state.items():
+                if prefix + "classification_heads." + k not in state_dict:
+                    logger.info("Overwriting " + prefix + "classification_heads." + k)
+                    state_dict[prefix + "classification_heads." + k] = v
+
+
+
+
+
+class TransformerClassificationHead(nn.Module):
+    """Head for sentence-level classification tasks."""
+
+    def __init__(
+        self,
+        input_dim,
+        inner_dim,
+        num_classes,
+        activation_fn,
+        pooler_dropout,
+        do_spectral_norm=False,
+    ):
+        super().__init__()
+        self.dense = nn.Linear(input_dim, inner_dim)
+        self.activation_fn = utils.get_activation_fn(activation_fn)
+        self.dropout = nn.Dropout(p=pooler_dropout)
+        self.out_proj = nn.Linear(inner_dim, num_classes)
+
+        if do_spectral_norm:
+            self.out_proj = torch.nn.utils.spectral_norm(self.out_proj)
+
+    def forward(self, features, **kwargs):
+        x = features
+        x = self.dropout(x)
+        x = self.dense(x)
+        x = self.activation_fn(x)
+        x = self.dropout(x)
+        x = self.out_proj(x)
+        return x
+
 
 
 def base_lm_architecture(args):
@@ -356,6 +587,10 @@ def base_lm_architecture(args):
     args.layernorm_embedding = getattr(args, "layernorm_embedding", False)
     args.checkpoint_activations = getattr(args, "checkpoint_activations", False)
     args.offload_activations = getattr(args, "offload_activations", False)
+
+    args.pooler_activation_fn = getattr(args, "pooler_activation_fn", "tanh")
+    args.pooler_dropout = getattr(args, "pooler_dropout", 0.0)
+
     if args.offload_activations:
         args.checkpoint_activations = True
 
