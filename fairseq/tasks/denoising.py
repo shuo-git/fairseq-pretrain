@@ -107,20 +107,20 @@ class DenoisingTask(LegacyFairseqTask):
             type=int,
             help="when masking N tokens, replace with 0, 1, or N tokens (use -1 for N)",
         )
-        parser.add_argument(
-            "--max-source-positions",
-            default=1024,
-            type=int,
-            metavar="N",
-            help="max number of tokens in the source sequence",
-        )
-        parser.add_argument(
-            "--max-target-positions",
-            default=1024,
-            type=int,
-            metavar="N",
-            help="max number of tokens in the target sequence",
-        )
+        # parser.add_argument(
+        #     "--max-source-positions",
+        #     default=1024,
+        #     type=int,
+        #     metavar="N",
+        #     help="max number of tokens in the source sequence",
+        # )
+        # parser.add_argument(
+        #     "--max-target-positions",
+        #     default=1024,
+        #     type=int,
+        #     metavar="N",
+        #     help="max number of tokens in the target sequence",
+        # )
 
         parser.add_argument(
             "--shorten-method",
