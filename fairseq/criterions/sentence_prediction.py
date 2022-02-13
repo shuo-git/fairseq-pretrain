@@ -45,8 +45,8 @@ class SentencePredictionCriterion(FairseqCriterion):
         ), "model must provide sentence classification head for --criterion=sentence_prediction"
 
 
-        logits0 = model(src_tokens=sample['net_input']['input0'], features_only=True)   # B x T x C
-        logits1 = model(src_tokens=sample['net_input']['input1'], features_only=True)   # B x T x C
+        logits0, _ = model(src_tokens=sample['net_input']['input0'], features_only=True)   # B x T x C
+        logits1, _ = model(src_tokens=sample['net_input']['input1'], features_only=True)   # B x T x C
 
         senemb0 = logits0[:,-1,:]
         senemb1 = logits1[:,-1,:]
