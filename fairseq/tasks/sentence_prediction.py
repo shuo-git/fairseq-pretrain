@@ -170,8 +170,8 @@ class SentencePredictionTask(FairseqTask):
 
         #     src_tokens = ConcatSentencesDataset(input0, input1)
 
-        with data_utils.numpy_seed(self.cfg.seed):
-            shuffle = np.random.permutation(len(src_tokens))
+        # with data_utils.numpy_seed(self.cfg.seed):
+        #     shuffle = np.random.permutation(len(src_tokens))
 
         # src_tokens = maybe_shorten_dataset(
         #     src_tokens,
