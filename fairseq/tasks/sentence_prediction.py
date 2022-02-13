@@ -23,6 +23,7 @@ from fairseq.data import (
     PrependTokenDataset,
     RawLabelDataset,
     RightPadDataset,
+    LeftPadDataset,
     RollDataset,
     SortDataset,
     StripTokenDataset,
@@ -158,50 +159,49 @@ class SentencePredictionTask(FairseqTask):
         )
         input1 = make_dataset("input1", self.source_dictionary)
 
-        if self.cfg.init_token is not None:
-            input0 = PrependTokenDataset(input0, self.cfg.init_token)
+        # if self.cfg.init_token is not None:
+        #     input0 = PrependTokenDataset(input0, self.cfg.init_token)
 
-        if input1 is None:
-            src_tokens = input0
-        else:
-            if self.cfg.separator_token is not None:
-                input1 = PrependTokenDataset(input1, self.cfg.separator_token)
+        # if input1 is None:
+        #     src_tokens = input0
+        # else:
+        #     if self.cfg.separator_token is not None:
+        #         input1 = PrependTokenDataset(input1, self.cfg.separator_token)
 
-            src_tokens = ConcatSentencesDataset(input0, input1)
+        #     src_tokens = ConcatSentencesDataset(input0, input1)
 
         with data_utils.numpy_seed(self.cfg.seed):
             shuffle = np.random.permutation(len(src_tokens))
 
-        src_tokens = maybe_shorten_dataset(
-            src_tokens,
-            split,
-            self.cfg.shorten_data_split_list,
-            self.cfg.shorten_method,
-            self.max_positions(),
-            self.cfg.seed,
-        )
+        # src_tokens = maybe_shorten_dataset(
+        #     src_tokens,
+        #     split,
+        #     self.cfg.shorten_data_split_list,
+        #     self.cfg.shorten_method,
+        #     self.max_positions(),
+        #     self.cfg.seed,
+        # )
 
         dataset = {
             "id": IdDataset(),
             "net_input": {
-                "src_tokens": RightPadDataset(
-                    src_tokens,
-                    pad_idx=self.source_dictionary.pad(),
-                ),
-                "src_lengths": NumelDataset(src_tokens, reduce=False),
+                "input0": LeftPadDataset(input0, pad_idx=self.source_dictionary.pad()),
+                "input0_lengths": NumelDataset(input0, reduce=False),
+                "input1": LeftPadDataset(input1, pad_idx=self.source_dictionary.pad()),
+                "input1_lengths": NumelDataset(input1, reduce=False),
             },
             "nsentences": NumSamplesDataset(),
-            "ntokens": NumelDataset(src_tokens, reduce=True),
+            "ntokens": NumelDataset(input0, reduce=True),
         }
 
-        if self.cfg.add_prev_output_tokens:
-            prev_tokens_dataset = RightPadDataset(
-                RollDataset(src_tokens, 1),
-                pad_idx=self.dictionary.pad(),
-            )
-            dataset["net_input"].update(
-                prev_output_tokens=prev_tokens_dataset,
-            )
+        # if self.cfg.add_prev_output_tokens:
+        #     prev_tokens_dataset = RightPadDataset(
+        #         RollDataset(src_tokens, 1),
+        #         pad_idx=self.dictionary.pad(),
+        #     )
+        #     dataset["net_input"].update(
+        #         prev_output_tokens=prev_tokens_dataset,
+        #     )
 
         if not self.cfg.regression_target:
             label_dataset = make_dataset("label", self.label_dictionary)

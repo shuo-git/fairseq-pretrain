@@ -44,11 +44,19 @@ class SentencePredictionCriterion(FairseqCriterion):
             and self.classification_head_name in model.classification_heads
         ), "model must provide sentence classification head for --criterion=sentence_prediction"
 
-        logits, _ = model(
-            **sample["net_input"],
-            features_only=True,
-            classification_head_name=self.classification_head_name,
-        )
+
+        logits0 = model(src_tokens=sample['net_input']['input0'], features_only=True)   # B x T x C
+        logits1 = model(src_tokens=sample['net_input']['input1'], features_only=True)   # B x T x C
+
+        senemb0 = logits0[:,-1,:]
+        senemb1 = logits1[:,-1,:]
+        cos = torch.nn.CosineSimilarity(dim=-1, eps=1e-6)
+        logits = cos(senemb0, senemb1)
+        # logits, _ = model(
+        #     **sample["net_input"],
+        #     features_only=True,
+        #     classification_head_name=self.classification_head_name,
+        # )
         targets = model.get_targets(sample, [logits]).view(-1)
         sample_size = targets.numel()
 
