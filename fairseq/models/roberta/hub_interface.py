@@ -55,6 +55,8 @@ class RobertaHubInterface(nn.Module):
             >>> roberta.encode('world').tolist()
             [0, 8331, 2]
         """
+        # no need to do bpe again
+        self.bpe.encode = lambda x: x
         bpe_sentence = "<s> " + self.bpe.encode(sentence) + " </s>"
         for s in addl_sentences:
             bpe_sentence += " </s>" if not no_separator else ""
