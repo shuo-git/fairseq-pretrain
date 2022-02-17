@@ -119,8 +119,8 @@ class RobertaHubInterface(nn.Module):
         return F.log_softmax(logits, dim=-1)
 
     def predict_siamese(self, tokens0: torch.LongTensor, tokens1: torch.LongTensor):
-        features0 = self.extract_features(tokens0.to(device=self.device))[-1]
-        features1 = self.extract_features(tokens1.to(device=self.device))[-1]
+        features0 = self.extract_features(tokens0.to(device=self.device))
+        features1 = self.extract_features(tokens1.to(device=self.device))
         cos = torch.nn.CosineSimilarity(dim=-1, eps=1e-6)
         cos_sim = cos(features0, features1).item()
         return 1 if cos_sim > 0 else -1
